@@ -1,0 +1,69 @@
+# PHARMASOFT DJIBOUTI — Stack complète locale (app + postgres + adminer)
+# Usage :
+#   docker compose up -d                # Démarre tout en arrière-plan
+#   docker compose exec app npx prisma migrate deploy   # Applique les migrations
+#   docker compose exec app npx prisma db seed          # Charge les données démo
+#   docker compose logs -f app           # Suivre les logs
+#   docker compose down -v               # Arrêter + supprimer les volumes (destructif)
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: pharmasoft-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pharmasoft
+      POSTGRES_PASSWORD: pharmasoft_pw_change_me
+      POSTGRES_DB: pharmasoft
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pharmasoft"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: pharmasoft-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://pharmasoft:pharmasoft_pw_change_me@db:5432/pharmasoft?schema=public"
+      AUTH_SECRET: "${AUTH_SECRET:-CHANGEZ-MOI-EN-PROD-OPENSSL-RAND-BASE64-32}"
+      # AUTH_URL volontairement non défini : trustHost=true gère l'hôte
+      # automatiquement (définir une URL fixe casserait l'accès multi-hôtes).
+      BCRYPT_ROUNDS: "10"
+      NEXT_PUBLIC_DEFAULT_LOCALE: "fr"
+      NEXT_PUBLIC_COUNTRY: "DJ"
+      NEXT_PUBLIC_TIMEZONE: "Africa/Djibouti"
+      NEXT_PUBLIC_CURRENCY: "Fdj"
+      NEXT_PUBLIC_TVA_RATE: "0.10"
+      NEXT_PUBLIC_PHARMACY_NAME: "Pharmacie Centrale Djibouti"
+      NEXT_PUBLIC_PHARMACY_ADDRESS: "Avenue Maréchal Joffre, Plateau du Serpent"
+      NEXT_PUBLIC_PHARMACY_CITY: "Djibouti-ville"
+      NEXT_PUBLIC_PHARMACY_PHONE: "+253 21 35 12 34"
+      NEXT_PUBLIC_PHARMACY_NIF: "12345-A"
+    ports:
+      - "3000:3000"
+
+  # Interface web pour explorer la BDD (admin uniquement, exposez avec prudence en prod)
+  adminer:
+    image: adminer:4
+    container_name: pharmasoft-adminer
+    restart: unless-stopped
+    depends_on:
+      - db
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+      ADMINER_DESIGN: dracula
+
+volumes:
+  db-data:
+    driver: local

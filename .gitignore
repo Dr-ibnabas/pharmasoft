@@ -1,0 +1,34 @@
+# Dépendances & builds
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# Secrets / env locaux (seuls les *.example sont versionnés)
+.env
+.env.*
+!.env.example
+!.env.local.example
+*.pem
+
+# Base SQLite locale, uploads, sauvegardes
+prisma/dev.db
+public/uploads/
+public/temp/
+*.bak
+*.backup
+*.dump
+
+# Logs
+*.log
+
+# Outils locaux / notes internes
+.claude/
+memory/
+.thumbnail/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

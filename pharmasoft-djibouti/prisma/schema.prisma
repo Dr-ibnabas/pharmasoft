@@ -1,0 +1,839 @@
+// PHARMASOFT DJIBOUTI — Schéma Prisma
+// Cible PostgreSQL. Convention :
+//  - Montants en Fdj stockés en Int (pas de centime, cf. DECISIONS.md D-030)
+//  - Toutes les dates en DateTime UTC (timezone applicative Africa/Djibouti)
+//  - Soft delete via deletedAt sur les ressources critiques (Medicine, Client)
+//  - Cuid() pour les IDs (plus court qu'un UUID v4, indexable, URL-safe)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ENUMS
+// ════════════════════════════════════════════════════════════════════
+
+enum Role {
+  SUPER_ADMIN
+  TITULAIRE
+  VENDEUR
+  CAISSIER
+}
+
+enum Locale {
+  FR
+  AR
+  EN
+}
+
+enum MedicineForm {
+  COMPRIME
+  COMPRIME_EFFERVESCENT
+  GELULE
+  SIROP
+  SACHET
+  AMPOULE
+  AEROSOL
+  POMMADE
+  COLLYRE
+  SUPPOSITOIRE
+  INJECTABLE
+  AUTRE
+}
+
+enum MedicineCategory {
+  ANTALGIQUE
+  ANTIBIOTIQUE
+  RESPIRATOIRE
+  DIGESTIF
+  CARDIO
+  ANTI_INFLAMMATOIRE
+  SOMNIFERE
+  VITAMINES
+  PEDIATRIE
+  ANTIDIABETIQUE
+  ANTISPASMODIQUE
+  AUTRE
+}
+
+enum StockMovementType {
+  IN_PURCHASE        // Réception fournisseur
+  OUT_SALE           // Sortie sur vente
+  OUT_LOSS           // Casse / perte
+  OUT_EXPIRY         // Périmé
+  ADJUST_PLUS        // Inventaire +
+  ADJUST_MINUS       // Inventaire -
+  RETURN_CUSTOMER    // Retour client
+  RETURN_SUPPLIER    // Retour fournisseur
+}
+
+enum ClientTier {
+  BRONZE
+  ARGENT
+  OR
+  PLATINE
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  DMONEY
+  WAAFI
+  INSURANCE
+  CREDIT
+  MIXED
+}
+
+enum SaleStatus {
+  COMPLETED
+  CANCELLED
+  REFUNDED
+  ON_HOLD
+}
+
+enum PrescriptionStatus {
+  PENDING            // Reçue, pas encore servie
+  PARTIAL            // Partiellement servie
+  FULFILLED          // Totalement servie
+  EXPIRED            // Expirée
+  CANCELLED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SENT
+  PARTIAL_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum InsuranceClaimStatus {
+  PENDING
+  SUBMITTED
+  APPROVED
+  PARTIAL
+  REJECTED
+  PAID
+}
+
+enum NotificationType {
+  STOCK_LOW
+  STOCK_OUT
+  EXPIRY_NEAR
+  EXPIRY_URGENT
+  SALE_COMPLETED
+  ORDER_RECEIVED
+  PRESCRIPTION_PENDING
+  USER_LOGIN
+  BACKUP_DONE
+  SYSTEM
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  CREATE
+  UPDATE
+  DELETE
+  STOCK_ADJUST
+  SALE_COMPLETE
+  SALE_CANCEL
+  SALE_REFUND
+  PRESCRIPTION_VALIDATE
+  PRESCRIPTION_REJECT
+  PRICE_CHANGE
+  REPORT_VIEW
+  BACKUP_CREATE
+  SETTINGS_UPDATE
+  PURCHASE_ORDER
+  PURCHASE_RECEIVE
+  INVENTORY_OPEN
+  INVENTORY_CLOSE
+  INVOICE_ISSUE
+  CONTROLLED_DISPENSE
+}
+
+enum RefundReason {
+  CLIENT_RETURN      // Retour client (produit non ouvert)
+  ERROR              // Erreur de caisse
+  DEFECT             // Produit défectueux
+  EXPIRED            // Produit périmé vendu
+  OTHER
+}
+
+enum InventoryStatus {
+  OPEN               // Session de comptage en cours
+  VALIDATED          // Écarts appliqués au stock
+  CANCELLED
+}
+
+enum InvoiceStatus {
+  ISSUED             // Émise
+  CANCELLED          // Annulée (avoir global)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// AUTH (NextAuth v5 — modèles compatibles + extensions PHARMASOFT)
+// ════════════════════════════════════════════════════════════════════
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  emailVerified   DateTime?
+  name            String
+  hashedPassword  String
+  role            Role
+  // PIN à 4 chiffres bcrypt — utilisé par le Titulaire pour valider une vente
+  // de médicament prescrit lancée par un Caissier (cf. DECISIONS.md D-014).
+  validationPin   String?
+  locale          Locale    @default(FR)
+  avatarColor     String?   // hex couleur de l'avatar
+  isActive        Boolean   @default(true)
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  accounts         Account[]
+  sessions         Session[]
+  sales            Sale[]
+  cashSessions     CashSession[]
+  stockMovements   StockMovement[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+  purchaseOrders   PurchaseOrder[]
+  prescriptionsValidated Prescription[] @relation("PrescriptionValidator")
+  inventorySessions InventorySession[]
+  refunds          Refund[]
+  controlledEntries ControlledRegisterEntry[]
+
+  @@index([role])
+  @@index([email])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PARAMÈTRES PHARMACIE (single-tenant — un seul enregistrement)
+// ════════════════════════════════════════════════════════════════════
+
+model Setting {
+  id              Int      @id @default(autoincrement())
+  pharmacyName    String
+  address         String
+  city            String
+  phone           String
+  email           String?
+  nif             String
+  logoUrl         String?
+  tvaRate         Decimal  @default(0.10) @db.Decimal(4, 4)
+  defaultLocale   Locale   @default(FR)
+  lowStockDefault Int      @default(20)
+  expiryWarnDays  Int      @default(90)
+  expiryAlertDays Int      @default(30)
+  updatedAt       DateTime @updatedAt
+}
+
+// ════════════════════════════════════════════════════════════════════
+// CATALOGUE MÉDICAMENTS
+// ════════════════════════════════════════════════════════════════════
+
+model Medicine {
+  id                  String           @id @default(cuid())
+  code                String           @unique           // ex: "M001"
+  barcode             String?          @unique
+  name                String
+  dci                 String                              // Dénomination commune internationale
+  form                MedicineForm
+  dosage              String                              // ex: "500mg"
+  laboratory          String
+  category            MedicineCategory
+  // Prix en Fdj (entiers, cf. DECISIONS.md D-030)
+  sellPrice           Int
+  purchasePrice       Int              @default(0)        // masqué pour VENDEUR (cf. D-013)
+  requiresPrescription Boolean         @default(false)
+  controlledSubstance Boolean          @default(false)    // ex: somnifères, opioïdes
+  lowStockThreshold   Int              @default(20)
+  description         String?
+  notes               String?
+  deletedAt           DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  lots                Lot[]
+  stockMovements      StockMovement[]
+  saleLines           SaleLine[]
+  prescriptionItems   PrescriptionItem[]
+  purchaseItems       PurchaseOrderItem[]
+  inventoryLines      InventoryCountLine[]
+  controlledEntries   ControlledRegisterEntry[]
+
+  @@index([name])
+  @@index([dci])
+  @@index([category])
+  @@index([barcode])
+}
+
+model Lot {
+  id           String   @id @default(cuid())
+  medicineId   String
+  lotNumber    String
+  quantity     Int                              // Quantité courante (mise à jour à chaque mouvement)
+  initialQty   Int                              // Quantité initiale à la réception
+  expiryDate   DateTime                         // Date de péremption
+  receivedAt   DateTime @default(now())
+  supplierId   String?
+  purchasePrice Int     @default(0)             // Prix unitaire d'achat de ce lot
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  medicine     Medicine        @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  supplier     Supplier?       @relation(fields: [supplierId], references: [id])
+  movements    StockMovement[]
+  saleLines    SaleLine[]
+  inventoryLines InventoryCountLine[]
+
+  @@unique([medicineId, lotNumber])
+  @@index([expiryDate])
+  @@index([medicineId, expiryDate])              // pour les requêtes FIFO
+}
+
+model StockMovement {
+  id          String            @id @default(cuid())
+  medicineId  String
+  lotId       String?
+  type        StockMovementType
+  quantity    Int                                 // Positif = entrée, Négatif = sortie (peut être signé)
+  reason      String?
+  reference   String?                             // ex: SaleId, PurchaseOrderId
+  userId      String
+  createdAt   DateTime          @default(now())
+
+  medicine Medicine @relation(fields: [medicineId], references: [id])
+  lot      Lot?     @relation(fields: [lotId], references: [id])
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@index([medicineId, createdAt])
+  @@index([type])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// CLIENTS
+// ════════════════════════════════════════════════════════════════════
+
+model Client {
+  id            String     @id @default(cuid())
+  code          String     @unique             // ex: "C001"
+  name          String
+  phone         String     @unique
+  email         String?
+  dateOfBirth   DateTime?
+  gender        String?
+  quarter       String?                         // Quartier de Djibouti-ville
+  address       String?
+  tier          ClientTier @default(BRONZE)
+  points        Int        @default(0)
+  totalSpent    Int        @default(0)          // Cumul des achats en Fdj
+  creditBalance Int        @default(0)          // Solde de crédit (positif = doit, négatif = avoir)
+  lastVisit     DateTime?
+  allergies     String[]   @default([])
+  conditions    String[]   @default([])         // ex: ["Diabète II", "Hypertension"]
+  notes         String?
+  deletedAt     DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  sales            Sale[]
+  prescriptions    Prescription[]
+  insuranceMembers InsuranceMember[]
+
+  @@index([name])
+  @@index([phone])
+  @@index([tier])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// VENTES
+// ════════════════════════════════════════════════════════════════════
+
+model CashSession {
+  id              String    @id @default(cuid())
+  userId          String                         // Le caissier qui a ouvert la session
+  openedAt        DateTime  @default(now())
+  closedAt        DateTime?
+  openingFloat    Int                            // Fond de caisse d'ouverture
+  expectedAmount  Int       @default(0)          // Calcul théorique
+  countedAmount   Int?                           // Compté à la clôture
+  discrepancy     Int?                           // expected - counted
+  notes           String?
+
+  user  User   @relation(fields: [userId], references: [id])
+  sales Sale[]
+
+  @@index([userId, openedAt])
+}
+
+model Sale {
+  id              String        @id @default(cuid())
+  ticketNumber    String        @unique          // Format "#NNNNN" (cf. DECISIONS.md D-033)
+  cashSessionId   String?
+  userId          String                         // Vendeur ou caissier
+  clientId        String?
+  subtotal        Int
+  discountPercent Decimal       @default(0) @db.Decimal(5, 2)
+  discountAmount  Int           @default(0)
+  taxRate         Decimal       @default(0.10) @db.Decimal(4, 4)
+  taxAmount       Int
+  total           Int
+  paymentMethod   PaymentMethod
+  paymentRef      String?                        // Référence externe (D-Money, Waafi, carte, …)
+  status          SaleStatus    @default(COMPLETED)
+  // Validation pharmacien (pour vente d'un produit sous ordonnance par le Caissier)
+  validatedByUserId String?
+  validatedAt     DateTime?
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Tiers-payant : montant pris en charge par l'assurance vs reste à payer client
+  insuranceCovered Int            @default(0)     // Part assurance (0 si pas de tiers-payant)
+  clientDue        Int            @default(0)     // Reste à charge du client
+  amountPaid       Int            @default(0)     // Total effectivement encaissé (somme des paiements)
+  changeGiven      Int            @default(0)     // Monnaie rendue
+
+  user           User             @relation(fields: [userId], references: [id])
+  client         Client?          @relation(fields: [clientId], references: [id])
+  cashSession    CashSession?     @relation(fields: [cashSessionId], references: [id])
+  lines          SaleLine[]
+  insuranceClaim InsuranceClaim?
+  payments       Payment[]
+  invoice        Invoice?
+  refunds        Refund[]
+  controlledEntries ControlledRegisterEntry[]
+
+  @@index([userId, createdAt])
+  @@index([clientId, createdAt])
+  @@index([createdAt])
+  @@index([status])
+}
+
+model SaleLine {
+  id              String   @id @default(cuid())
+  saleId          String
+  medicineId      String
+  lotId           String?
+  prescriptionId  String?                        // Si la ligne provient d'une ordonnance
+  quantity        Int
+  unitPrice       Int                            // Prix unitaire au moment de la vente
+  discountPercent Decimal  @default(0) @db.Decimal(5, 2)
+  lineTotal       Int                            // (unitPrice * qty) - remise
+
+  sale          Sale          @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  medicine      Medicine      @relation(fields: [medicineId], references: [id])
+  lot           Lot?          @relation(fields: [lotId], references: [id])
+  prescription  Prescription? @relation(fields: [prescriptionId], references: [id])
+
+  @@index([saleId])
+  @@index([medicineId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ORDONNANCES
+// ════════════════════════════════════════════════════════════════════
+
+model Prescription {
+  id               String              @id @default(cuid())
+  code             String              @unique     // ex: "RX-2026-00001"
+  clientId         String
+  doctorName       String
+  doctorContact    String?
+  issuedDate       DateTime                          // Date de prescription
+  expiresAt        DateTime?                         // Habituellement 1 an pour la France/Djibouti
+  scannedImageUrl  String?                           // Photo de l'ordonnance
+  status           PrescriptionStatus  @default(PENDING)
+  validatedByUserId String?
+  validatedAt      DateTime?
+  notes            String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  client     Client             @relation(fields: [clientId], references: [id])
+  validator  User?              @relation("PrescriptionValidator", fields: [validatedByUserId], references: [id])
+  items      PrescriptionItem[]
+  saleLines  SaleLine[]
+
+  @@index([clientId])
+  @@index([status])
+  @@index([issuedDate])
+}
+
+model PrescriptionItem {
+  id             String       @id @default(cuid())
+  prescriptionId String
+  medicineId     String
+  quantity       Int                                // Quantité prescrite
+  dispensedQty   Int          @default(0)           // Quantité déjà délivrée
+  posology       String?                            // ex: "1cp x 3/j x 7j"
+  duration       String?                            // ex: "7 jours"
+
+  prescription Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+  medicine     Medicine     @relation(fields: [medicineId], references: [id])
+
+  @@index([prescriptionId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// FOURNISSEURS & ACHATS
+// ════════════════════════════════════════════════════════════════════
+
+model Supplier {
+  id        String   @id @default(cuid())
+  code      String   @unique                       // ex: "S001"
+  name      String
+  contact   String?
+  phone     String
+  email     String?
+  address   String?
+  city      String?
+  balance   Int      @default(0)                   // Solde dû (positif = on doit)
+  notes     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lots           Lot[]
+  purchaseOrders PurchaseOrder[]
+
+  @@index([name])
+}
+
+model PurchaseOrder {
+  id            String              @id @default(cuid())
+  code          String              @unique         // ex: "CMD-2026-0001"
+  supplierId    String
+  status        PurchaseOrderStatus @default(DRAFT)
+  subtotal      Int                 @default(0)
+  taxAmount     Int                 @default(0)
+  total         Int                 @default(0)
+  orderedAt     DateTime            @default(now())
+  expectedAt    DateTime?
+  receivedAt    DateTime?
+  createdById   String
+  notes         String?
+  updatedAt     DateTime            @updatedAt
+
+  supplier  Supplier            @relation(fields: [supplierId], references: [id])
+  createdBy User                @relation(fields: [createdById], references: [id])
+  items     PurchaseOrderItem[]
+
+  @@index([supplierId])
+  @@index([status])
+}
+
+model PurchaseOrderItem {
+  id              String   @id @default(cuid())
+  purchaseOrderId String
+  medicineId      String
+  quantity        Int
+  receivedQty     Int      @default(0)
+  unitPrice       Int                              // Prix d'achat unitaire négocié
+  lineTotal       Int
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  medicine      Medicine      @relation(fields: [medicineId], references: [id])
+
+  @@index([purchaseOrderId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ASSURANCES
+// ════════════════════════════════════════════════════════════════════
+
+model Insurance {
+  id           String  @id @default(cuid())
+  code         String  @unique                     // ex: "I001"
+  name         String  @unique
+  coverageRate Int                                  // Taux de couverture en % (0..100)
+  contactPhone String?
+  contactEmail String?
+  address      String?
+  isActive     Boolean @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  members InsuranceMember[]
+  claims  InsuranceClaim[]
+}
+
+model InsuranceMember {
+  id           String    @id @default(cuid())
+  insuranceId  String
+  clientId     String
+  memberNumber String                                // Numéro adhérent
+  validFrom    DateTime  @default(now())
+  validUntil   DateTime?
+  isActive     Boolean   @default(true)
+
+  insurance Insurance @relation(fields: [insuranceId], references: [id])
+  client    Client    @relation(fields: [clientId], references: [id])
+
+  @@unique([insuranceId, clientId])
+  @@unique([insuranceId, memberNumber])
+}
+
+model InsuranceClaim {
+  id              String               @id @default(cuid())
+  saleId          String               @unique
+  insuranceId     String
+  amountClaimed   Int                                 // Montant réclamé à l'assurance
+  amountApproved  Int?                                // Montant approuvé
+  amountPaid      Int?                                // Montant effectivement payé
+  status          InsuranceClaimStatus @default(PENDING)
+  batchId         String?                             // ID du bordereau d'envoi mensuel
+  submittedAt     DateTime?
+  paidAt          DateTime?
+  notes           String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  sale      Sale      @relation(fields: [saleId], references: [id])
+  insurance Insurance @relation(fields: [insuranceId], references: [id])
+
+  @@index([insuranceId])
+  @@index([status])
+  @@index([batchId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// NOTIFICATIONS & AUDIT
+// ════════════════════════════════════════════════════════════════════
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String?                                  // null = notification globale
+  type      NotificationType
+  title     String
+  message   String
+  link      String?
+  isRead    Boolean          @default(false)
+  metadata  Json?
+  createdAt DateTime         @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  userId     String?                                   // null pour login échoué (user inconnu)
+  action     AuditAction
+  resource   String?                                   // ex: "Sale", "Medicine"
+  resourceId String?
+  details    Json?                                     // payload arbitraire
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([action])
+  @@index([resource, resourceId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PAIEMENTS MULTIPLES (un paiement = une ligne ; total = somme des lignes)
+// Permet le paiement mixte (ex: 5000 espèces + reste en carte).
+// ════════════════════════════════════════════════════════════════════
+
+model Payment {
+  id        String        @id @default(cuid())
+  saleId    String
+  method    PaymentMethod
+  amount    Int                                       // Montant de ce moyen de paiement
+  reference String?                                   // Réf transaction (D-Money, Waafi, carte)
+  createdAt DateTime      @default(now())
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@index([saleId])
+  @@index([method])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SÉQUENCES — compteurs atomiques pour numérotation inviolable
+// (factures, bons de commande, etc.). Incrément via transaction.
+// ════════════════════════════════════════════════════════════════════
+
+model Sequence {
+  key       String   @id                              // ex: "invoice-2026", "po-2026"
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+// ════════════════════════════════════════════════════════════════════
+// FACTURATION — facture conforme rattachée à une vente
+// ════════════════════════════════════════════════════════════════════
+
+model Invoice {
+  id            String        @id @default(cuid())
+  number        String        @unique                 // ex: "FAC-2026-00001" (séquentiel inviolable)
+  saleId        String        @unique
+  clientName    String                                // Figé au moment de l'émission
+  clientNif     String?
+  subtotal      Int
+  discountAmount Int          @default(0)
+  taxRate       Decimal       @db.Decimal(4, 4)
+  taxAmount     Int
+  total         Int
+  status        InvoiceStatus @default(ISSUED)
+  issuedById    String?
+  issuedAt      DateTime      @default(now())
+  cancelledAt   DateTime?
+
+  sale Sale @relation(fields: [saleId], references: [id])
+
+  @@index([issuedAt])
+  @@index([status])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// REMBOURSEMENTS / AVOIRS — retour client (ré-incrémente le stock)
+// ════════════════════════════════════════════════════════════════════
+
+model Refund {
+  id          String       @id @default(cuid())
+  code        String       @unique                    // ex: "AV-2026-00001"
+  saleId      String                                  // Vente d'origine
+  userId      String                                  // Qui a effectué le retour
+  reason      RefundReason
+  amount      Int                                     // Montant remboursé
+  restock     Boolean      @default(true)             // Le produit retourne-t-il en stock ?
+  notes       String?
+  createdAt   DateTime     @default(now())
+
+  sale  Sale         @relation(fields: [saleId], references: [id])
+  user  User         @relation(fields: [userId], references: [id])
+  lines RefundLine[]
+
+  @@index([saleId])
+  @@index([createdAt])
+}
+
+model RefundLine {
+  id         String @id @default(cuid())
+  refundId   String
+  medicineId String
+  lotId      String?
+  quantity   Int
+  unitPrice  Int
+  lineTotal  Int
+
+  refund Refund @relation(fields: [refundId], references: [id], onDelete: Cascade)
+
+  @@index([refundId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// INVENTAIRE PHYSIQUE — session de comptage + écarts
+// ════════════════════════════════════════════════════════════════════
+
+model InventorySession {
+  id          String          @id @default(cuid())
+  code        String          @unique                 // ex: "INV-2026-001"
+  status      InventoryStatus @default(OPEN)
+  startedById String
+  notes       String?
+  startedAt   DateTime        @default(now())
+  validatedAt DateTime?
+
+  startedBy User                 @relation(fields: [startedById], references: [id])
+  lines     InventoryCountLine[]
+
+  @@index([status])
+}
+
+model InventoryCountLine {
+  id          String @id @default(cuid())
+  sessionId   String
+  medicineId  String
+  lotId       String?
+  expectedQty Int                                     // Stock théorique au moment du comptage
+  countedQty  Int?                                    // Stock physique compté (null = pas encore compté)
+  difference  Int    @default(0)                      // countedQty - expectedQty
+
+  session  InventorySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  medicine Medicine         @relation(fields: [medicineId], references: [id])
+  lot      Lot?             @relation(fields: [lotId], references: [id])
+
+  @@index([sessionId])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// REGISTRE DES STUPÉFIANTS (ordonnancier) — obligation légale
+// Une entrée par délivrance de produit controlledSubstance.
+// ════════════════════════════════════════════════════════════════════
+
+model ControlledRegisterEntry {
+  id            String   @id @default(cuid())
+  entryNumber   Int                                   // Numéro séquentiel du registre (inviolable)
+  saleId        String
+  medicineId    String
+  userId        String
+  quantity      Int
+  clientName    String?                               // Patient (figé)
+  clientPhone   String?
+  doctorName    String?                               // Prescripteur (figé)
+  prescriptionCode String?
+  balanceAfter  Int                                   // Stock restant après délivrance (traçabilité)
+  createdAt     DateTime @default(now())
+
+  sale     Sale     @relation(fields: [saleId], references: [id])
+  medicine Medicine @relation(fields: [medicineId], references: [id])
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@index([medicineId, createdAt])
+  @@index([entryNumber])
+}
